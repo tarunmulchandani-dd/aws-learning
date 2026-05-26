@@ -1,0 +1,208 @@
+service: image-thumbnail-service
+
+frameworkVersion: "4"
+
+provider:
+  name: aws
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512  # Default for all lambdas (overridable per function)
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+            - s3:ListBucket
+          Resource:
+            - !GetAtt ImagesBucket.Arn
+            - !Sub "${ImagesBucket.Arn}/*"
+
+  # API Gateway binary media types
+  apiGateway:
+    binaryMediaTypes:
+      - "image/*"
+      - "multipart/form-data"
+      - "application/octet-stream"
+      - "application/json"
+  # Environment variables available to all functions
+  environment:
+    IMAGES_BUCKET: !Ref ImagesBucket
+    # THUMBNAILS_BUCKET: !Ref ThumbnailsBucket
+    STAGE: ${self:provider.stage}
+
+# ──────────────────────────────────────────────
+# FUNCTIONS
+# ──────────────────────────────────────────────
+functions:
+
+  # ── Lambda 1: Java — Upload Image ──────────────
+  uploadImage:
+    runtime: java17
+    memorySize: 512
+    timeout: 29
+    handler: org.example.ImageHandlerLegacy::handleRequest
+    package:
+      artifact: upload-handler-service/Serverless-Image-Handler/target/Serverless-Image-Handler-1.0-SNAPSHOT.jar   # Path to your built JAR
+    description: "Accepts image uploads (binary) and stores them in the images bucket"
+    events:
+      - http:
+          path: /images
+          method: post
+          cors: true
+          # Required for API Gateway to pass binary payloads to Lambda
+          # contentHandling: CONVERT_TO_BINARY
+
+  get-presigned-url:
+    runtime: java17
+    memorySize: 512
+    timeout: 29
+    handler: org.example.ImageUrlGenerator::handleRequest
+    package:
+      artifact: upload-handler-service/Serverless-Image-Handler/target/Serverless-Image-Handler-1.0-SNAPSHOT.jar   # Path to your built JAR
+    description: "Returns the presigned url."
+  #   events:
+    events:
+      - http:
+          path: /images/pre-signed
+          method: get
+          cors: true
+      
+  
+      
+  # # ── Lambda 3: Java — Generate Thumbnail ────────
+  # generateThumbnail:
+  #   runtime: java17
+  #   memorySize: 512
+  #   timeout: 60
+  #   handler: com.example.handlers.ThumbnailHandler
+  #   package:
+  #     artifact: target/thumbnail-generator.jar   # Path to your built JAR
+  #   description: "Triggered by S3 upload events; generates and saves thumbnail"
+  #   events:
+  #     # Triggered automatically when an image lands in the images bucket
+  #     - s3:
+  #         bucket: !Ref ImagesBucket
+  #         event: s3:ObjectCreated:*
+  #         existing: true   # Bucket is managed in Resources below
+
+  # # ── Lambda 4: Node.js — Get / List Images ──────
+  # getImages:
+  #   runtime: nodejs20.x
+  #   memorySize: 512
+  #   timeout: 15
+  #   handler: src/handlers/getImages.handler
+  #   description: "Returns image metadata and pre-signed thumbnail URLs"
+  #   events:
+  #     - http:
+  #         path: /images
+  #         method: get
+  #         cors: true
+  #     - http:
+  #         path: /images/{imageId}
+  #         method: get
+  #         cors: true
+
+# ──────────────────────────────────────────────
+# RESOURCES (CloudFormation)
+# ──────────────────────────────────────────────
+resources:
+  Resources:
+
+    # ── S3 Bucket: Original Images ───────────────
+    ImagesBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-images
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders:
+                - "*"
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+              AllowedOrigins:
+                - "*"
+              MaxAge: 3000
+        LifecycleConfiguration:
+          Rules:
+            - Id: ExpireOldImages
+              Status: Enabled
+              ExpirationInDays: 365   # Adjust or remove as needed
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+#     # ── S3 Bucket: Thumbnails ────────────────────
+#     ThumbnailsBucket:
+#       Type: AWS::S3::Bucket
+#       Properties:
+#         BucketName: ${self:service}-${self:provider.stage}-thumbnails
+#         CorsConfiguration:
+#           CorsRules:
+#             - AllowedHeaders:
+#                 - "*"
+#               AllowedMethods:
+#                 - GET
+#               AllowedOrigins:
+#                 - "*"
+#               MaxAge: 3000
+#         PublicAccessBlockConfiguration:
+#           BlockPublicAcls: true
+#           BlockPublicPolicy: true
+#           IgnorePublicAcls: true
+#           RestrictPublicBuckets: true
+
+#   # ── Stack Outputs ─────────────────────────────
+#   Outputs:
+#     ImagesBucketName:
+#       Value: !Ref ImagesBucket
+#       Export:
+#         Name: ${self:service}-${self:provider.stage}-images-bucket
+
+#     ThumbnailsBucketName:
+#       Value: !Ref ThumbnailsBucket
+#       Export:
+#         Name: ${self:service}-${self:provider.stage}-thumbnails-bucket
+
+#     ApiGatewayUrl:
+#       Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}"
+#       Export:
+#         Name: ${self:service}-${self:provider.stage}-api-url
+
+# ──────────────────────────────────────────────
+# PLUGINS
+# ──────────────────────────────────────────────
+plugins:
+  - serverless-localstack
+
+# ──────────────────────────────────────────────
+# LOCALSTACK CONFIG
+# ──────────────────────────────────────────────
+custom:
+  localstack:
+    stages:
+      - local                    # Only active when deploying with --stage local
+    host: http://localhost        # LocalStack default host
+    edgePort: 4566               # LocalStack unified edge port
+    autostart: false             # Set true to auto-start LocalStack via Docker
+    networks:
+      - host
+    lambda:
+      mountCode: false            # Mount code directly for faster iteration (no re-deploy needed)
+    docker:
+      sudo: false
+    deploy:
+      createStage: true
+
+# ──────────────────────────────────────────────
+# PACKAGE  (default: exclude everything, include explicitly)
+# ──────────────────────────────────────────────
+package:
+  individually: true   # Each function packages its own artifact
+  excludeDevDependencies: true
